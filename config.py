@@ -7,7 +7,7 @@ AUTO_KICK = False
 FAKE_SCORE_THRESHOLD = 0.5
 
 # Public username of the managed channel
-CHANNEL_ID = "@azmayeshichannel22"
+CHANNEL_IDS = ["@azmayeshichannel22","@footbalitarinha"]
 
 # ---- New settings for daily automated scan ----
 # Placeholder – replace with your numeric Telegram user ID so the bot can DM you the report

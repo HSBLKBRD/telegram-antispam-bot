@@ -11,6 +11,8 @@ You will be prompted for your Telethon credentials (API_ID, API_HASH, phone numb
 import asyncio
 import json
 import os
+import tempfile
+import shutil
 from typing import Set
 
 from telethon import TelegramClient
@@ -25,6 +27,17 @@ except ImportError:
 # Path used by the main bot to store member IDs
 MEMBERS_FILE = "members.json"
 
+
+def atomic_save_members(ids: set[int], path: str = MEMBERS_FILE) -> None:
+    """Write the sorted list of IDs to *path* atomically.
+    Uses a temporary file in the same directory and then renames it.
+    """
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_file:
+        json.dump(sorted(ids), tmp_file, ensure_ascii=False, indent=2)
+    shutil.move(tmp_path, path)
+
+
 async def fetch_members(client: TelegramClient, channel_identifier: str) -> Set[int]:
     """Return a set of user IDs present in *channel_identifier*.
     The identifier can be a username ("@mychannel") or a numeric chat ID.
@@ -35,11 +48,11 @@ async def fetch_members(client: TelegramClient, channel_identifier: str) -> Set[
         print(f"⚠️ Unable to resolve channel {channel_identifier}: {e}")
         return set()
 
-    # Telethon's iter_participants works for both super‑groups and channels.
     ids: Set[int] = set()
     async for participant in client.iter_participants(entity):
         ids.add(participant.id)
     return ids
+
 
 async def main():
     # ------------------------------------------------------------
@@ -47,7 +60,9 @@ async def main():
     # ------------------------------------------------------------
     api_id_input = input("Enter your Telegram API_ID (integer): ").strip()
     api_hash = input("Enter your Telegram API_HASH (string): ").strip()
-    phone = input("Enter the phone number associated with the account (e.g. +1234567890): ").strip()
+    phone = input(
+        "Enter the phone number associated with the account (e.g. +1234567890): "
+    ).strip()
 
     try:
         api_id = int(api_id_input)
@@ -59,7 +74,7 @@ async def main():
     # ------------------------------------------------------------
     client = TelegramClient("extractor_session", api_id, api_hash)
     print("🔐 Connecting to Telegram…")
-    await client.start(phone=phone)  # will trigger code request if needed
+    await client.start(phone=phone)  # may trigger a code request
     print("✅ Authenticated.")
 
     # ------------------------------------------------------------
@@ -74,7 +89,7 @@ async def main():
             print("⚠️ Could not read existing members.json – starting with an empty set.")
 
     # ------------------------------------------------------------
-    # 4️⃣ Iterate over every channel defined in config.py and collect members.
+    # 4️⃣ Iterate over every channel in config.py and collect members.
     # ------------------------------------------------------------
     new_ids: Set[int] = set()
     for ch in CHANNEL_IDS:
@@ -87,10 +102,11 @@ async def main():
     # 5️⃣ Merge and write back to members.json.
     # ------------------------------------------------------------
     combined = existing_ids.union(new_ids)
-    with open(MEMBERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(combined), f, ensure_ascii=False, indent=2)
+    atomic_save_members(combined)
     print(f"✅ Finished. members.json now contains {len(combined)} unique user IDs.")
+
     await client.disconnect()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

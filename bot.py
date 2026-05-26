@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime, time, timezone, timedelta
 import pytz
-
+logger = logging.getLogger(__name__)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -51,38 +51,81 @@ known_members = load_known_members()
 
 # ------------------------------------------------------------
 # Heuristic fake‑score
-def fake_score(user) -> float:
-    """Return a score 0‑1 – higher means more likely fake."""
-    score = 0.0
+import unicodedata
+import re
 
+# ------------------------------------------------------------
+# Heuristic fake‑score (enhanced)
+
+def _base_fake_score(user) -> float:
+    """Base score from existing heuristics (age, username, photo, name length, bot)."""
+    score = 0.0
     # 1️⃣ Account age (Telegram IDs embed creation time)
     creation_ts = user.id >> 32
     creation_dt = datetime.fromtimestamp(creation_ts, tz=timezone.utc)
     age_hours = (datetime.now(tz=timezone.utc) - creation_dt).total_seconds() / 3600
     if age_hours < 24:
         score += 0.4
-
     # 2️⃣ No username
-    if not user.username:
+    if not getattr(user, "username", None):
         score += 0.2
-
     # 3️⃣ No profile picture
-    if not user.photo:
+    if not getattr(user, "photo", None):
         score += 0.2
-
     # 4️⃣ Very short first name
-    if not user.first_name or len(user.first_name) < 2:
+    if not getattr(user, "first_name", None) or len(user.first_name) < 2:
         score += 0.1
-
     # 5️⃣ Is a bot
-    if user.is_bot:
+    if getattr(user, "is_bot", False):
         score += 0.1
+    return min(score, 1.0)
 
+def _has_non_latin(name: str) -> bool:
+    """Return True if *name* contains any non‑Latin alphabetic characters."""
+    for ch in name:
+        if ch.isalpha():
+            try:
+                if "LATIN" not in unicodedata.name(ch):
+                    return True
+            except ValueError:
+                # Some characters may not have a name; treat as non‑Latin
+                return True
+    return False
+
+def _is_gibberish(name: str) -> bool:
+    """Simple gibberish detection: short alphanumeric strings with low vowel ratio."""
+    if not name:
+        return False
+    # Consider only letters/digits
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", name)
+    if len(cleaned) < 5 or len(cleaned) > 12:
+        return False
+    # Vowel proportion
+    vowels = sum(1 for c in cleaned.lower() if c in "aeiou")
+    if len(cleaned) == 0:
+        return False
+    return (vowels / len(cleaned)) < 0.3
+
+# Placeholder removed – is_fake implementation provided above.
+
+def is_fake(user) -> float:
+    """Return a fake‑score (0‑1). Higher indicates more likely fake.
+    Combines base heuristics with character‑script analysis and gibberish detection.
+    """
+    score = _base_fake_score(user)
+    # Additional checks
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    full_name = f"{first} {last}".strip()
+    if _has_non_latin(full_name):
+        score += 0.2
+    if _is_gibberish(full_name):
+        score += 0.2
     return min(score, 1.0)
 
 
-def is_fake(user) -> bool:
-    return fake_score(user) >= FAKE_SCORE_THRESHOLD
+
+
 
 
 # ------------------------------------------------------------
@@ -118,8 +161,7 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_known_members(known_members)
 
     # Evaluate
-    score = fake_score(user)
-
+    score = is_fake(user)
     if AUTO_KICK and score >= FAKE_SCORE_THRESHOLD:
         # Automatic removal (should not happen when AUTO_KICK is False)
         await context.bot.ban_chat_member(chat.id, uid)
@@ -128,7 +170,6 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚫 Auto‑removed suspected fake [{user.full_name}](tg://user?id={uid}) (score {score:.2f}).",
         )
         return
-
     # Manual review – inline buttons
     kb = InlineKeyboardMarkup(
         [
@@ -161,18 +202,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Heavy maintenance command – run in the bot's private chat.
+    Only admins of managed channels may execute this.
     """
-    Heavy maintenance command – must be run in the bot's private chat.
-    The caller must be an admin/creator of one of the managed channels.
-    """
-    # 1️⃣ Private‑chat only
+    # 1️⃣ Ensure private chat
     if update.effective_chat.type != "private":
         await update.effective_message.reply_text(
             "⚙️ Please run /scan_fake in a private chat with the bot."
         )
         return
 
-    # 2️⃣ Verify admin of any managed channel
+    # 2️⃣ Verify admin rights in any managed channel
     user = update.effective_user
     is_admin = False
     for ch in CHANNEL_IDS:
@@ -182,7 +222,6 @@ async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 is_admin = True
                 break
         except Exception as e:
-            # Log but continue checking other channels
             logger.info(f"⚠️ Admin check failed for {ch}: {e}")
     if not is_admin:
         await update.effective_message.reply_text(
@@ -190,25 +229,19 @@ async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3️⃣ Scan users globally (decoupled from per‑channel get_chat_member)
+    # 3️⃣ Scan each known user via get_chat (bypasses channel restrictions)
     from telegram.error import BadRequest
     total_processed = 0
     report_users: list[tuple[int, str, float]] = []
     for uid in list(known_members):
-        try:
-            user_obj = await context.bot.get_chat(uid)
-        except BadRequest as e:
-            logger.warning(f"BadRequest when fetching uid {uid}: {e.message}")
-            continue
-        except Exception as e:
-            logger.error(f"Unexpected error when fetching uid {uid}: {e}")
-            continue
-        if is_fake(user_obj):
-            score = fake_score(user_obj)
+        user_obj = await context.bot.get_chat(uid)
+        score = is_fake(user_obj)
+        if score >= FAKE_SCORE_THRESHOLD:
             report_users.append((uid, user_obj.full_name, score))
             known_members.discard(uid)
             total_processed += 1
-    # 4️⃣ Build and send the report (no per‑channel grouping)
+
+    # 4️⃣ Send aggregated report to admin
     if not report_users:
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="No suspected fake users found.")
     else:
@@ -218,6 +251,7 @@ async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
 
+    # Persist updated member set and acknowledge
     save_known_members(known_members)
     await update.effective_message.reply_text(
         f"🔎 Scan complete. Total processed: {total_processed}"
@@ -228,15 +262,10 @@ async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------
 # Background job: daily automated scan
 async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs automatically each day at SCAN_TIME (America/Toronto timezone).
-    Sends a concise summary to ADMIN_CHAT_ID (private DM).
-    """
-    # If ADMIN_CHAT_ID is still the placeholder, skip the job silently.
+    """Runs daily at SCAN_TIME, scanning members per channel and reporting to ADMIN_CHAT_ID."""
     if ADMIN_CHAT_ID == 0:
         return
 
-    # Perform the same scan logic but **without** sending per‑user messages to the channel.
     report_by_channel: dict[str, list[tuple[int, str, float]]] = {}
     total_processed = 0
     for ch_id in CHANNEL_IDS:
@@ -245,15 +274,14 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
             try:
                 cm = await context.bot.get_chat_member(ch_id, uid)
                 user_obj = cm.user
-                if is_fake(user_obj):
-                    fake_users.append((uid, user_obj.full_name, fake_score(user_obj)))
-                    known_members.discard(uid)
+                    score = is_fake(user_obj)
+                    if score >= FAKE_SCORE_THRESHOLD:
+                        fake_users.append((uid, user_obj.full_name, score))
+                        known_members.discard(uid)
             except Exception as e:
-                from telegram.error import BadRequest, TelegramError
+                from telegram.error import BadRequest
                 if isinstance(e, BadRequest):
-                    logger.warning(
-                        f"BadRequest for get_chat_member in scheduled scan ({ch_id}) uid {uid}: {e.message}"
-                    )
+                    logger.warning(f"BadRequest for get_chat_member in scheduled scan ({ch_id}) uid {uid}: {e.message}")
                 else:
                     logger.error(f"Error during scheduled scan for uid {uid} in {ch_id}: {e}")
                 continue
@@ -267,62 +295,14 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
         lines = []
         for ch, users in report_by_channel.items():
             lines.append(f"📢 Channel: {ch}")
-            for i, (uid, name, score) in enumerate(users):
-                lines.append(f"{i+1}. [{name}](tg://user?id={uid}) (Score: {score:.2f})")
+            for i, (uid, name, score) in enumerate(users, start=1):
+                lines.append(f"{i}. [{name}](tg://user?id={uid}) (Score: {score:.2f})")
             lines.append("")
         report = "\n".join(lines).strip()
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
 
     save_known_members(known_members)
 
-    # Prepare the DM summary
-    summary = (
-        f"🕛 Daily Fake‑Subscriber Scan Report\n"
-        f"Time: {datetime.now(pytz.timezone('America/Toronto')).strftime('%Y-%m-%d %H:%M')}\n"
-        f"Total processed: {total_processed}\n"
-    )
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=summary)
-    """
-    Runs automatically each day at SCAN_TIME (America/Toronto timezone).
-    Sends a concise summary to ADMIN_CHAT_ID (private DM).
-    """
-    # If ADMIN_CHAT_ID is still the placeholder, skip the job silently.
-    if ADMIN_CHAT_ID == 0:
-        return
-
-    # Perform the same scan logic but **without** sending per‑user messages to the channel.
-    report_by_channel = {}
-    total_processed = 0
-    for ch_id in CHANNEL_IDS:
-        fake_users = []
-        for uid in list(known_members):
-            try:
-                cm = await context.bot.get_chat_member(ch_id, uid)
-                user_obj = cm.user
-                if is_fake(user_obj):
-                    fake_users.append((uid, user_obj.full_name, fake_score(user_obj)))
-                    known_members.discard(uid)
-            except Exception:
-                known_members.discard(uid)
-        if fake_users:
-            report_by_channel[ch_id] = fake_users
-            total_processed += len(fake_users)
-
-    if not report_by_channel:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="No suspected fake users found.")
-    else:
-        lines = []
-        for ch, users in report_by_channel.items():
-            lines.append(f"📢 Channel: {ch}")
-            for i, (uid, name, score) in enumerate(users):
-                lines.append(f"{i+1}. [{name}](tg://user?id={uid}) (Score: {score:.2f})")
-            lines.append("")
-        report = "\n".join(lines).strip()
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
-
-    save_known_members(known_members)
-
-    # Prepare the DM summary
     summary = (
         f"🕛 Daily Fake‑Subscriber Scan Report\n"
         f"Time: {datetime.now(pytz.timezone('America/Toronto')).strftime('%Y-%m-%d %H:%M')}\n"
@@ -366,9 +346,11 @@ def main() -> None:
     # --------------------------------------------------------
     # Logging
     logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
     )
-    print("🤖 Bot started – listening for events")
+    logger = logging.getLogger(__name__)
+    logger.info("🤖 Bot started – listening for events")
     app.run_polling()
 
 

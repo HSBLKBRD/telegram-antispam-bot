@@ -1,7 +1,7 @@
 # config.py – behaviour settings
 
 # Auto‑kick suspected fake users
-AUTO_KICK = True
+AUTO_KICK = False
 
 # Fake‑score threshold (0‑1)
 FAKE_SCORE_THRESHOLD = 0.5

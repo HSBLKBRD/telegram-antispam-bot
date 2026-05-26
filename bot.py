@@ -178,36 +178,30 @@ async def scan_fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3️⃣ Perform the scan
     total = len(known_members)
-    kicked = 0
-    kept = 0
-
+    fake_users = []
     for uid in list(known_members):
         try:
             cm = await context.bot.get_chat_member(CHANNEL_ID, uid)
             user_obj = cm.user
             if is_fake(user_obj):
-                if AUTO_KICK:
-                    await context.bot.ban_chat_member(CHANNEL_ID, uid)
-                    kicked += 1
-                else:
-                    await context.bot.send_message(
-                        CHANNEL_ID,
-                        f"⚠️ Suspected fake: [{user_obj.full_name}](tg://user?id={uid}) "
-                        f"(score {fake_score(user_obj):.2f})",
-                    )
-                    kept += 1
+                fake_users.append((uid, user_obj.full_name, fake_score(user_obj)))
                 known_members.discard(uid)
-            else:
-                kept += 1
         except Exception:
-            # User might have left already
             known_members.discard(uid)
+
+    if not fake_users:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="No suspected fake users found.")
+    else:
+        lines = [
+            f"{i+1}. [{name}](tg://user?id={uid}) (Score: {score:.2f})"
+            for i, (uid, name, score) in enumerate(fake_users)
+        ]
+        report = "\n".join(lines)
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
 
     save_known_members(known_members)
     await update.effective_message.reply_text(
-        f"🔎 Scan complete. Total scanned: {total}\n"
-        f"Kicked: {kicked}\n"
-        f"Kept: {kept}"
+        f"🔎 Scan complete. Total scanned: {total}"
     )
 
 
@@ -224,25 +218,26 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
 
     # Perform the same scan logic but **without** sending per‑user messages to the channel.
     total = len(known_members)
-    kicked = 0
-    kept = 0
-
+    fake_users = []
     for uid in list(known_members):
         try:
             cm = await context.bot.get_chat_member(CHANNEL_ID, uid)
             user_obj = cm.user
             if is_fake(user_obj):
-                if AUTO_KICK:
-                    await context.bot.ban_chat_member(CHANNEL_ID, uid)
-                    kicked += 1
-                else:
-                    # silent – just count
-                    kept += 1
+                fake_users.append((uid, user_obj.full_name, fake_score(user_obj)))
                 known_members.discard(uid)
-            else:
-                kept += 1
         except Exception:
             known_members.discard(uid)
+
+    if not fake_users:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text="No suspected fake users found.")
+    else:
+        lines = [
+            f"{i+1}. [{name}](tg://user?id={uid}) (Score: {score:.2f})"
+            for i, (uid, name, score) in enumerate(fake_users)
+        ]
+        report = "\n".join(lines)
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=report)
 
     save_known_members(known_members)
 

@@ -4,7 +4,7 @@
 AUTO_KICK = False
 
 # Fake‑score threshold (0‑1)
-FAKE_SCORE_THRESHOLD = 0.5
+FAKE_SCORE_THRESHOLD = 0.1
 
 # Public username of the managed channel
 CHANNEL_IDS = ["@azmayeshichannel22","@footbalitarinha"]

@@ -1,12 +1,18 @@
 # config.py – behaviour settings
 
-# Whether the bot should automatically kick users that are classified as fake
-AUTO_KICK = True               # Set to False if you prefer manual admin review
+# Auto‑kick suspected fake users
+AUTO_KICK = True
 
-# Score threshold (0‑1). Users with a fake_score >= this value are considered fake
+# Fake‑score threshold (0‑1)
 FAKE_SCORE_THRESHOLD = 0.5
 
-# Identifier of the public channel the bot manages.
-# Use the channel’s public username (e.g., "@your_channel_username")
-# Replace the placeholder with the actual username of your channel.
+# Public username of the managed channel
 CHANNEL_ID = "@azmayeshichannel22"
+
+# ---- New settings for daily automated scan ----
+# Placeholder – replace with your numeric Telegram user ID so the bot can DM you the report
+ADMIN_CHAT_ID = 1314254592
+
+# Time of day (HH:MM) when the scan should run, interpreted in the America/Toronto timezone
+SCAN_TIME = "00:00"
+
